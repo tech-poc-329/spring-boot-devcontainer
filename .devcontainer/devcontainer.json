@@ -1,0 +1,26 @@
+{
+    "name": "Spring Boot DevContainer",
+    "dockerFile": "Dockerfile",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "vscjava.vscode-java-pack",
+                "vmware.vscode-spring-boot",
+                "pivotal.vscode-spring-boot-dashboard",
+                "vscjava.vscode-spring-initializr",
+                "redhat.vscode-xml",
+                "vscjava.vscode-maven"
+            ],
+            "settings": {
+                "java.configuration.updateBuildConfiguration": "automatic",
+                "java.server.launchMode": "Standard"
+            }
+        }
+    },
+    "forwardPorts": [8080],
+    "postCreateCommand": "sudo chown -R vscode:vscode /workspaces/spring-boot-devcontainer",
+    "remoteUser": "vscode",
+    "mounts": [
+        "source=${localWorkspaceFolder}/target,target=/workspaces/spring-boot-devcontainer/target,type=bind,consistency=cached"
+    ]
+}

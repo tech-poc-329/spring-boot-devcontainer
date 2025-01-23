@@ -1,0 +1,213 @@
+pip install pytest pytest-mock
+
+
+# tests/test_config.py
+
+import os
+import pytest
+from unittest.mock import patch, mock_open
+from edt_service.config import load_env_specific_values, get_field_config
+
+def test_load_env_specific_values_default(monkeypatch):
+    # Ensure no environment variable is set
+    monkeypatch.delenv('JIRA_ENV', raising=False)
+    
+    with patch('builtins.open', mock_open(read_data='{"PROJECT_KEY": "TEST"}')):
+        config = load_env_specific_values()
+        assert config['PROJECT_KEY'] == 'TEST'
+        assert config['JIRA_EPIC_KEY'] == None  # Assuming not set
+
+def test_load_env_specific_values_prod(monkeypatch):
+    monkeypatch.setenv('JIRA_ENV', 'prod')
+    
+    with patch('pathlib.Path.exists', return_value=True), \
+         patch('builtins.open', mock_open(read_data='{"PROJECT_KEY": "PROD_PROJECT"}')):
+        config = load_env_specific_values()
+        assert config['PROJECT_KEY'] == 'PROD_PROJECT'
+
+def test_get_field_config(monkeypatch):
+    monkeypatch.setenv('JIRA_ENV', 'test')
+    monkeypatch.setenv('JIRA_PROJECT_KEY', 'TEST_PROJECT')
+    monkeypatch.setenv('JIRA_EPIC_KEY', 'EPIC-123')
+    
+    with patch('builtins.open', mock_open(read_data='{}')):
+        config = get_field_config()
+        assert config['static_fields']['project']['key'] == 'TEST_PROJECT'
+        assert config['static_fields']['Epic Link'] == 'EPIC-123'
+
+
+# tests/test_util.py
+
+import pytest
+from unittest.mock import patch, MagicMock
+from edt_service.util import extract_guid_from_body, classify_email_regex, connect_to_exchange, connect_to_jira
+
+def test_extract_guid_from_body():
+    body = "Please refer to EDT Reference ID: ABCD-1234 for more details."
+    guid = extract_guid_from_body(body)
+    assert guid == "ABCD-1234"
+
+    body_no_guid = "No reference ID here."
+    guid = extract_guid_from_body(body_no_guid)
+    assert guid is None
+
+def test_classify_email_regex():
+    text = "We are facing issues with the Node.js application using Express and React."
+    categories = classify_email_regex(text)
+    assert "Node.js" in categories
+
+    text = "This email is about SQL Server and MongoDB databases."
+    categories = classify_email_regex(text)
+    assert "Database" in categories
+
+    text = "Unknown tools mentioned here."
+    categories = classify_email_regex(text)
+    assert "Other" in categories
+
+@patch('edt_service.util.Account')
+def test_connect_to_exchange_success(mock_account, monkeypatch):
+    mock_account_instance = MagicMock()
+    mock_account.return_value = mock_account_instance
+    monkeypatch.setenv('EMAIL_USERNAME', 'user@example.com')
+    monkeypatch.setenv('MAIL_BOX_PASSWORD', 'encrypted_password')
+
+    with patch('edt_service.util.decrypt_data', return_value='decrypted_password'):
+        account = connect_to_exchange()
+        mock_account.assert_called_once()
+        assert account == mock_account_instance
+
+@patch('edt_service.util.JIRA')
+def test_connect_to_jira_success(mock_jira, monkeypatch):
+    mock_jira_instance = MagicMock()
+    mock_jira.return_value = mock_jira_instance
+    monkeypatch.setenv('JIRA_API_TOKEN', 'api_token')
+    monkeypatch.setenv('JIRA_URL', 'https://jira.example.com')
+
+    with patch('edt_service.util.decrypt_data', return_value='decrypted_token'):
+        jira = connect_to_jira()
+        mock_jira.assert_called_once_with('https://jira.example.com', token_auth='decrypted_token', options={'verify': None})
+        assert jira == mock_jira_instance
+
+
+# tests/test_jira_util.py
+
+import pytest
+from unittest.mock import patch, MagicMock
+from edt_service.jira_util import process_email, add_email_as_attachment, make_transitions
+
+@patch('edt_service.jira_util.create_jira_issue')
+@patch('edt_service.jira_util.add_email_as_attachment')
+@patch('edt_service.jira_util.make_transitions')
+def test_process_email(mock_make_transitions, mock_add_attachment, mock_create_issue, monkeypatch):
+    mock_jira = MagicMock()
+    mock_issue = MagicMock()
+    mock_issue.key = 'TEST-1'
+    mock_create_issue.return_value = (mock_issue, ['Node.js', 'Database'])
+
+    email = MagicMock()
+    guid = 'GUID-1234'
+
+    category_str, jira_key = process_email(email, mock_jira, guid)
+    
+    mock_create_issue.assert_called_once_with(email, mock_jira)
+    mock_add_attachment.assert_called_once_with(email, mock_jira, mock_issue, guid)
+    mock_make_transitions.assert_called_once_with(mock_jira, 'TEST-1')
+    mock_jira.add_watcher.assert_called_once_with('TEST-1', 'WATCHER_USER')
+    
+    assert category_str == 'Node.js,Database'
+    assert jira_key == 'TEST-1'
+
+@patch('edt_service.jira_util.JIRA')
+def test_add_email_as_attachment(mock_jira_class, monkeypatch):
+    mock_jira = MagicMock()
+    mock_issue = MagicMock()
+    mock_jira.add_attachment = MagicMock()
+    monkeypatch.setattr('edt_service.jira_util.jira', mock_jira)
+
+    email = MagicMock()
+    email.subject = "Test Subject"
+    email.datetime_received.strftime.return_value = "20230101"
+    guid = 'GUID-1234'
+    
+    with patch('edt_service.jira_util.Create_email_to_html_with_images', return_value=MagicMock()):
+        add_email_as_attachment(email, mock_jira, mock_issue, guid)
+        filename = "Test Subject_GUID-1234.html"
+        mock_jira.add_attachment.assert_called_once()
+
+# tests/test_jirabot.py
+
+import pytest
+from unittest.mock import patch, MagicMock
+from jira_bot import app, check_mailbox
+
+@pytest.fixture
+def client():
+    app.config['TESTING'] = True
+    with app.test_client() as client:
+        yield client
+
+def test_heartbeat_not_run(client):
+    with patch('jira_bot.last_run_time', None):
+        response = client.get('/heartbeat')
+        assert response.status_code == 503
+        assert b"JIRABot hasn't completed a run yet" in response.data
+
+def test_heartbeat_recent_run(client, monkeypatch):
+    monkeypatch.setattr('jira_bot.last_run_time', lambda:  time.time() - 100)
+    response = client.get('/heartbeat')
+    assert response.status_code == 200
+    assert b"JIRABot is up and running" in response.data
+
+def test_heartbeat_stale_run(client, monkeypatch):
+    monkeypatch.setattr('jira_bot.last_run_time', lambda:  time.time() - 700)
+    response = client.get('/heartbeat')
+    assert response.status_code == 503
+    assert b"JIRABot may be having issues" in response.data
+
+@patch('jira_bot.check_mailbox')
+def test_run_now(mock_check_mailbox, client):
+    response = client.post('/run_now')
+    mock_check_mailbox.assert_called_once()
+    assert response.status_code == 302  # Redirect
+
+@patch('jira_bot.connect_to_exchange')
+@patch('jira_bot.connect_to_jira')
+@patch('jira_bot.process_email')
+@patch('jira_bot.update_email_thread_attachment')
+@patch('jira_bot.send_email_response')
+def test_check_mailbox_success(mock_send_email_response, mock_update_attachment, mock_process_email, 
+                              mock_connect_jira, mock_connect_exchange, caplog):
+    mock_exchange = MagicMock()
+    mock_jira = MagicMock()
+    mock_connect_exchange.return_value = mock_exchange
+    mock_connect_jira.return_value = mock_jira
+
+    # Mock unread messages
+    message1 = MagicMock()
+    message1.is_read = False
+    message1.text_body = "EDT Reference ID: GUID-1234"
+    mock_exchange.inbox.filter.return_value = [message1]
+
+    with caplog.at_level('INFO'):
+        check_mailbox()
+        assert "Mailbox check completed successfully." in caplog.text
+
+def test_check_mailbox_no_connections(caplog):
+    with patch('jira_bot.connect_to_exchange', return_value=None), \
+         patch('jira_bot.connect_to_jira', return_value=None):
+        with caplog.at_level('ERROR'):
+            check_mailbox()
+            assert "Failed to connect to Exchange or JIRA." in caplog.text
+
+
+pip install pytest-cov
+pytest --cov=edt_service tests/
+
+
+Running Tests :
+
+pytest
+
+pytest -v
+
+
